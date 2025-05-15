@@ -36,8 +36,8 @@ from jaxued.wrappers import AutoReplayWrapper
 # Hack to resolve paths
 import sys
 sys.path.append('.')
-from examples.craftax.craftax_wrappers import CraftaxLoggerGymnaxWrapper, LogWrapper
-from examples.craftax.mutators import (make_mutator_craftax_mutate_angles,
+from craftax_wrappers import CraftaxLoggerGymnaxWrapper, LogWrapper
+from mutators import (make_mutator_craftax_mutate_angles,
                        make_mutator_craftax_swap,
                        make_mutator_craftax_swap_restricted)
 
