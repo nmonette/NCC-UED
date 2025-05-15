@@ -1,0 +1,33 @@
+command:
+  - python3
+  - ${program}
+  - ${args}
+entity: 
+method: grid
+metric:
+  goal: maximize
+  name: eval/returns_mean
+parameters:
+  mode:
+    values:
+      - online
+  train_seed:
+    values: 
+      - 42
+      - 43
+      - 44
+      - 45
+      - 46
+      - 47
+      - 48
+      - 49
+      - 50
+      - 51
+  benchmark_id:
+    values:
+      - high-3m
+name: xland-ncc-sim
+program: training/ncc_sim.py
+project: minigrid
+
+

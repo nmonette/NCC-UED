@@ -1,0 +1,17 @@
+defaults:
+  - env: minigrid
+  - learning: ippo-minigrid-ncc
+  - ued: ncc
+  - _self_
+
+"SEED": 2
+"GROUP_NAME": "minigrid-ncc"
+"ENTITY": "flair"
+"PROJECT": "minigrid"
+"WANDB_MODE" : "online"
+"SAVE_PATH": "checkpoints/new_minigrid"
+"CHECKPOINT_SAVE_INTERVAL": 0
+"META_LR": 0.006880119088674936
+"META_TRUNC": 1e-5
+"META_OPTIMISTIC": True
+"OPTIMISTIC": False
