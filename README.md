@@ -32,7 +32,7 @@ In essence, we use gradients to _learn_ a <a href="https://arxiv.org/abs/2010.03
 ## $\alpha$-CVaR Evaluation
 The $\alpha$-CVaR evaluation tests policies under their $\alpha$% worst case levels. Our method obtains very strong performance on Minigrid in this regime:
 
-<center><img height="350px"src="assets/cvar_line.svg"></img></center>
+<p align="center"><img align="center" height="350px"src="assets/cvar_line.svg"></img></p>
 
 In order to recreate these results, look in each environment's `deploy` directory. After running the corresponding experiments, first generate the levels in `...generate_levels.py` (not needed with Craftax), then evaluate the proper runs in `...rollout.py` and finally produce the plots in `...analyse.py`.
 
