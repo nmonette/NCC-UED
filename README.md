@@ -5,7 +5,7 @@
         <img src="https://img.shields.io/badge/license-Apache2.0-blue.svg" /></a>
        <a href= "https://arxiv.org/abs/2408.15099">
         <img src="https://img.shields.io/badge/arXiv-2408.15099-b31b1b.svg" /></a>
-        <a href= "https://arxiv.org/abs/2408.15099">
+        <a href= "https://nmonette.github.io/optimising-ued/">
         <img src="https://img.shields.io/badge/blog_post-purple" /></a>
         
 </p>
