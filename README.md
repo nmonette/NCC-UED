@@ -4,7 +4,7 @@
        <a href= "https://github.com/nmonette/NCC-UED/blob/main/LICENSE">
         <img src="https://img.shields.io/badge/license-Apache2.0-blue.svg" /></a>
        <a href= "https://openreview.net/forum?id=WnknYUybWX">
-        <img src="https://img.shields.io/badge/OpenReview-2408.15099-b31b1b.svg" /></a>
+        <img src="https://img.shields.io/badge/OpenReview-WnknYUybWX-b31b1b.svg" /></a>
         <a href= "https://nmonette.github.io/optimising-ued/">
         <img src="https://img.shields.io/badge/blog_post-purple" /></a>
         
