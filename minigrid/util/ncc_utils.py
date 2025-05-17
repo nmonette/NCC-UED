@@ -176,14 +176,6 @@ def ti_ada(
         optax.scale(-eta) if isinstance(eta, float) else optax.scale_by_schedule(lambda t: -eta(t)) 
     )
 
-def ti_ada_sgd(
-    eta: float = 1e-4,
-    alpha: float = 0.6
-):
-    return optax.chain(
-        scale_x_by_ti_ada_noadam(1.0, alpha),
-        optax.scale(-eta) if isinstance(eta, float) else optax.scale_by_schedule(lambda t: -eta(t))
-    )
     
 def projection_simplex_truncated(x: jnp.ndarray, eps: float) -> jnp.ndarray: 
     """

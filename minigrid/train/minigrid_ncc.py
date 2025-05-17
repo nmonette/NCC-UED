@@ -345,7 +345,7 @@ def main(config):
 
         rng, train_state, xhat, prev_grad, y_opt_state = carry
 
-        new_score = xhat # projection_simplex_truncated(xhat + prev_grad, config["META_TRUNC"]) if config["META_OPTIMISTIC"] else xhat
+        new_score = xhat 
         sampler = {**train_state.sampler, "scores": new_score}
         # Collect trajectories on replay levels
         rng, rng_levels, rng_reset = jax.random.split(rng, 3)

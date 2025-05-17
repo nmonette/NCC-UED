@@ -68,8 +68,6 @@ class TrainConfig:
     benchmark_id: str = "high-3m"
     img_obs: bool = False
     # agent
-    optimistic: bool = True
-    meta_optimistic: bool = True
     meta_trunc: float = 1e-5
     meta_lr: float = 1e-3
 
@@ -377,8 +375,7 @@ def make_train(
             rng, _rng1, _rng2, _rng3 = jax.random.split(rng, num=4)
             
             # sample rulesets for this meta update
-            branch = level_sampler.sample_replay_decision(train_state.sampler, _rng1).astype(int)
-            new_score = projection_simplex_truncated(xhat + prev_grad, config.meta_trunc) if config.meta_optimistic else xhat
+            new_score = xhat
             sampler = {**train_state.sampler, "scores": new_score}
             rng, _rng = jax.random.split(rng)
             sampler, (level_idxs, rulesets) = level_sampler.sample_replay_levels(sampler, _rng, config.num_envs_per_device)

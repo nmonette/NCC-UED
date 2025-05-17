@@ -68,8 +68,6 @@ class TrainConfig:
     benchmark_id: str = "high-3m"
     img_obs: bool = False
     # agent
-    optimistic: bool = True
-    meta_optimistic: bool = True
     meta_trunc: float = 1e-5
     meta_lr: float = 1e-3
 

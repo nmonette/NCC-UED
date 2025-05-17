@@ -88,84 +88,6 @@ class ScaleByTiAdaState:
     exp_b1: float | None = 1.0
     exp_b2: float | None = 1.0
 
-@dataclass 
-class ScaleByTiAdaNoAdamState:
-    vx: dict[float]
-    coord_vx: dict[jnp.ndarray]
-
-    vy: float
-    coord_vy: jnp.ndarray = None
-
-
-def scale_x_by_ti_ada_noadam(
-    eta: float = 1e-4,
-    alpha: float = 0.6,
-):
-    def init_fn(params):
-        vx = 0.0
-        coord_vx = jax.tree_util.tree_map(jnp.zeros_like, params)
-
-        return ScaleByTiAdaNoAdamState(
-            vx = vx,
-            coord_vx = coord_vx,
-            vy = 0.0
-        )
-    
-    def update_fn(x_updates, state, params=None):
-
-        vx = state.vx + tree_l2_norm(x_updates, squared=True)
-        coord_vx = jax.tree_util.tree_map(
-            lambda prev, curr: prev + jnp.square(curr), state.coord_vx, x_updates
-        )
-        
-        global_coeff = eta * jax.lax.pow(vx, alpha) / jax.lax.pow(jnp.maximum(vx, state.vy) + 1e-6, alpha)
-        
-        grad = jax.tree_util.tree_map(
-            lambda g, c:  g * global_coeff * jax.lax.pow(c + 1e-6, -alpha), x_updates, coord_vx
-        )
-
-        state = ScaleByTiAdaNoAdamState(
-            vx = vx,
-            coord_vx = coord_vx,
-            vy = state.vy,
-        )
-
-        return grad, state
-    
-    return optax.GradientTransformation(init_fn, update_fn) 
-        
-def scale_y_by_ti_ada_noadam(
-    eta: float = 1e-4,
-    beta: float = 0.4,
-):
-    def init_fn(params):
-        return ScaleByTiAdaNoAdamState(
-            vx = None,
-            coord_vx = None,
-            vy = 0.0,
-            coord_vy = jnp.zeros_like(params)
-        )
-    
-    def  update_fn(updates, state, params=None):
-        # track vy for the x player's stepsize
-        vy = state.vy + jnp.square(jnp.linalg.norm(updates))
-        coord_vy = state.coord_vy + jnp.square(updates)
-
-        coeff = eta / jax.lax.pow(coord_vy + 1e-6, beta)
-
-        grad = coeff * updates
-
-        state = ScaleByTiAdaNoAdamState(
-            vx = None,
-            coord_vx = None,
-            vy = vy,
-            coord_vy = coord_vy
-        )
-
-        return grad, state
-
-    return optax.GradientTransformation(init_fn, update_fn) 
-
 def scale_x_by_ti_ada(
     vx0: float = 0.1,
     vy0: float = 0.1, # just pass in a zeros_like y_params
@@ -198,7 +120,7 @@ def scale_x_by_ti_ada(
         ratio = jax.lax.pow(total_sum_vx, alpha) / jax.lax.pow(jax.lax.max(total_sum_vx, total_sum_vy), alpha)
 
         coeff = jax.tree_util.tree_map(
-            lambda v: eta / (jax.lax.pow(v, alpha) / jnp.sqrt(1 - exp_b2) + eps), vx
+            lambda v: eta / (jax.lax.pow(v / jnp.sqrt(1 - exp_b2), alpha) + eps), vx
         )
 
         bias_corrected_grad = jax.tree_util.tree_map(lambda m: m / (1 - exp_b1), grad)
@@ -276,14 +198,6 @@ def ti_ada(
         optax.scale(-eta) if isinstance(eta, float) else optax.scale_by_schedule(lambda t: -eta(t)) 
     )
 
-def ti_ada_sgd(
-    eta: float = 1e-4,
-    alpha: float = 0.6
-):
-    return optax.chain(
-        scale_x_by_ti_ada_noadam(1.0, alpha),
-        optax.scale(-eta) if isinstance(eta, float) else optax.scale_by_schedule(lambda t: -eta(t))
-    )
     
 def projection_simplex_truncated(x: jnp.ndarray, eps: float) -> jnp.ndarray: 
     """

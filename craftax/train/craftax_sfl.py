@@ -25,8 +25,6 @@ from flax import core, struct
 from flax.linen.initializers import constant, orthogonal
 from flax.training.train_state import TrainState as BaseTrainState
 
-from ncc_utils import scale_y_by_ti_ada, ScaleByTiAdaState, ti_ada, projection_simplex_truncated
-
 import wandb
 from jaxued.environments.underspecified_env import (EnvParams, EnvState,
                                                     Observation,

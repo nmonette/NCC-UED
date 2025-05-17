@@ -11,6 +11,6 @@ defaults:
 "WANDB_MODE" : "online"
 "SAVE_PATH": "checkpoints/new_minigrid"
 "CHECKPOINT_SAVE_INTERVAL": 0
-"META_LR": 0.1
-"META_REG": 0.05
+"META_LR": 0.005
+"META_REG": 0.032
 "META_TRUNC": 1e-5

@@ -372,7 +372,7 @@ class LevelSampler(BaseLevelSampler):
             sampler["levels_extra"] = level_extras
         return sampler
 
-@hydra.main(version_base=None, config_path="config", config_name="minigrid-ncc")
+@hydra.main(version_base=None, config_path="config", config_name="minigrid-ncc-reg")
 def main(config):
 
     config = OmegaConf.to_container(config)

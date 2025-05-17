@@ -171,7 +171,7 @@ class LevelSampler(BaseLevelSampler):
 class TrainState(BaseTrainState):
     sampler: core.FrozenDict[str, chex.ArrayTree] = struct.field(pytree_node=True)
 
-@hydra.main(version_base=None, config_path="config", config_name="minigrid-ncc")
+@hydra.main(version_base=None, config_path="config", config_name="minigrid-ncc-reg")
 def main(config):
 
     config = OmegaConf.to_container(config)
@@ -351,7 +351,7 @@ def main(config):
 
         rng, train_state, xhat, prev_grad, y_opt_state = carry
 
-        new_score = xhat # projection_simplex_truncated(xhat + prev_grad, config["META_TRUNC"]) if config["META_OPTIMISTIC"] else xhat
+        new_score = xhat 
         sampler = {**train_state.sampler, "scores": new_score}
         # Collect trajectories on replay levels
         rng, rng_levels, rng_reset = jax.random.split(rng, 3)
