@@ -33,7 +33,6 @@ from xminigrid.wrappers import GymAutoResetWrapper
 from jaxued.level_sampler import LevelSampler as BaseLevelSampler
 from jaxued.utils import compute_max_returns, max_mc, positive_value_loss
 from ncc_utils import scale_y_by_ti_ada, ScaleByTiAdaState, ti_ada, projection_simplex_truncated
-from ncc_zs import rollout_nsteps_score
 
 # this will be default in new jax versions anyway
 jax.config.update("jax_threefry_partitionable", True)
@@ -139,6 +138,68 @@ class TrainState(BaseTrainState):
     # === Below is used for logging ===
     num_dr_updates: int
     num_replay_updates: int
+
+def rollout_nsteps_score(
+    rng: jax.Array,
+    env: Environment,
+    env_params: EnvParams,
+    train_state: TrainState,
+    init_hstate: jax.Array,
+    num_steps: int = 500
+):
+    """ Rollout for `num_steps` environment steps """
+
+    def _env_step(carry, unused):
+        rng, prev_timestep, prev_action, prev_reward, hstate = carry
+
+        rng, _rng = jax.random.split(rng)
+        dist, value, hstate = train_state.apply_fn(
+            train_state.params,
+            {
+                "observation": prev_timestep.observation[None, None, ...],
+                "prev_action": prev_action[None, None, ...],
+                "prev_reward": prev_reward[None, None, ...],
+            },
+            hstate,
+        )
+        action, log_prob = dist.sample_and_log_prob(seed=_rng)
+        action, value, log_prob = action.squeeze(), value.squeeze(1), log_prob.squeeze(1)
+        timestep = env.step(env_params, prev_timestep, action)
+        carry = (rng, timestep, action, timestep.reward, hstate)
+        return carry, Transition(
+            done=jnp.zeros_like(timestep.last()),
+            ep_done=timestep.last(),
+            action=action,
+            value=value,
+            reward=timestep.reward,
+            log_prob=log_prob,
+            obs=prev_timestep.observation,
+            prev_action=prev_action,
+            prev_reward=prev_reward,
+        )
+
+    timestep = env.reset(env_params, rng)
+    prev_action = jnp.asarray(0)
+    prev_reward = jnp.asarray(0)
+    init_carry = (rng, timestep, prev_action, prev_reward, init_hstate)
+
+    final_carry, transitions = jax.lax.scan(_env_step, init_carry, None, length=num_steps)
+
+     # CALCULATE ADVANTAGE
+    rng, timestep, prev_action, prev_reward, hstate = final_carry
+    # calculate value of the last step for bootstrapping
+    _, last_val, _ = train_state.apply_fn(
+        train_state.params,
+        {
+                "observation": timestep.observation[None, None, ...],
+                "prev_action": prev_action[None, None, ...],
+                "prev_reward": prev_reward[None, None, ...],
+        },
+        hstate,
+    )
+
+    return transitions, last_val
+    
     
 class Transition(struct.PyTreeNode):
     done: jax.Array

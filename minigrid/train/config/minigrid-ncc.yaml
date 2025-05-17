@@ -6,7 +6,7 @@ defaults:
 
 "SEED": 2
 "GROUP_NAME": "minigrid-ncc"
-"ENTITY": "flair"
+"ENTITY": ""
 "PROJECT": "minigrid"
 "WANDB_MODE" : "online"
 "SAVE_PATH": "checkpoints/new_minigrid"
