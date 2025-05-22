@@ -579,12 +579,7 @@ def make_train(
             rng, train_state = runner_state[:2]
             # WARN: do not forget to get updated params
 
-            train_state = train_state.replace(
-                opt_state = jax.tree_util.tree_map(
-                    lambda x: x if type(x) is not ScaleByTiAdaState else x.replace(vy = y_opt_state.vy), train_state.opt_state
-                ),
-                sampler = new_sampler
-            )
+            train_state = train_state.replace(sampler = new_sampler)
             
             outcomes = runner_state[-2]
             success_rate = outcomes.at[:, 1].get() / outcomes.at[:, 0].get()

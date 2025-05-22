@@ -788,9 +788,6 @@ def main(config=None, project="JAXUED_TEST"):
         }
 
         train_state = train_state.replace(
-            opt_state = jax.tree_util.tree_map(
-                lambda x: x if type(x) is not ScaleByTiAdaState else x.replace(vy = y_opt_state.vy), train_state.opt_state
-            ),
             sampler = sampler,
             update_state=UpdateState.REPLAY,
             num_replay_updates=train_state.num_replay_updates + 1,
