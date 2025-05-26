@@ -173,6 +173,22 @@ class BestIterateState(TrainState):
             best_grad_norm=new_best_grad_norm,
             **kwargs,
         )
+    
+def safe_norm(
+    x,
+    min_norm,
+    ord = None, 
+    axis = None,
+    keepdims = False,
+):
+    """
+    Taken from Optax utils
+    """
+    norm = jnp.linalg.norm(x, ord=ord, axis=axis, keepdims=True)
+    x = jnp.where(norm <= min_norm, jnp.ones_like(x), x)
+    norm = jnp.squeeze(norm, axis=axis) if not keepdims else norm
+    masked_norm = jnp.linalg.norm(x, ord=ord, axis=axis, keepdims=keepdims)
+    return jnp.where(norm <= min_norm, min_norm, masked_norm) 
 
 def update_actor_critic_rnn(
     rng: chex.PRNGKey,
@@ -220,8 +236,7 @@ def update_actor_critic_rnn(
                 log_probs_pred = pi.log_prob(actions)
                 entropy = pi.entropy().mean()
 
-                policy_loss = -(log_probs_pred * targets).mean() 
-                # value_loss = 0.5 * (values - targets) ** 2
+                policy_loss = -(log_probs_pred * targets).sum(0).mean() 
                 loss = policy_loss - entropy_coeff * entropy
 
                 return loss, {"policy_loss": policy_loss, "entropy":entropy}
@@ -230,6 +245,16 @@ def update_actor_critic_rnn(
             (total_loss, losses), grads = grad_fn(train_state.params)
             if update_grad:
                 train_state = train_state.apply_gradients(grads=grads)
+
+                # clip into (large) box constraints to ensure ipschitzness/stability as per https://openreview.net/pdf?id=Hygxb2CqKm
+                train_state = train_state.replace(
+                    params=jax.tree_util.tree_map(
+                        lambda x: jnp.clip(x, min=-1000, max=1000), train_state.params
+                    )
+                )
+                # NOTE: if you would like you can also divide x by safe_norm(x, 1e-6, axis=0, keepdims=True) if you would like 
+                #       to improve stability
+                
             return train_state, {**losses, "total_loss": total_loss, "grad_norm": tree_l2_norm(grads)}
 
         rng, train_state = carry
@@ -372,7 +397,7 @@ class LevelSampler(BaseLevelSampler):
             sampler["levels_extra"] = level_extras
         return sampler
 
-@hydra.main(version_base=None, config_path="config", config_name="minigrid-ncc-reg")
+@hydra.main(version_base=None, config_path="config", config_name="minigrid-ncc-theory")
 def main(config):
 
     config = OmegaConf.to_container(config)
