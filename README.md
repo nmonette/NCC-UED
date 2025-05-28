@@ -3,8 +3,8 @@
 <p align="center">
        <a href= "https://github.com/nmonette/NCC-UED/blob/main/LICENSE">
         <img src="https://img.shields.io/badge/license-Apache2.0-blue.svg" /></a>
-       <a href= "https://openreview.net/forum?id=WnknYUybWX">
-        <img src="https://img.shields.io/badge/OpenReview-WnknYUybWX-b31b1b.svg" /></a>
+       <a href= "https://arxiv.org/abs/2505.20659v1">
+        <img src="https://img.shields.io/badge/arXiv-2505.20659-b31b1b.svg" /></a>
         <a href= "https://nmonette.github.io/optimising-ued/">
         <img src="https://img.shields.io/badge/blog_post-purple" /></a>
         
