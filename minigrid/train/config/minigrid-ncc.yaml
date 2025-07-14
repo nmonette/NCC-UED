@@ -14,3 +14,4 @@ defaults:
 "META_LR": 0.1
 "META_REG": 0.05
 "META_TRUNC": 1e-5
+"STATIC_BUFFER": False

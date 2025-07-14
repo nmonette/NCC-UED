@@ -30,21 +30,16 @@ from jaxued.linen import ResetRNN
 from jaxued.environments import Maze, MazeSolved, MazeRenderer
 from jaxued.environments.maze import Level, make_level_generator, make_level_mutator_minimax
 from jaxued.level_sampler import LevelSampler as BaseLevelSampler
-from jaxued.utils import compute_max_returns, max_mc, positive_value_loss
 from jaxued.wrappers import AutoReplayWrapper
 
-from sfl.util.jaxued.jaxued_utils import l1_value_loss
-from sfl.train.train_utils import save_params
-from sfl.train.minigrid_plr import (
+from train_utils import save_params
+from minigrid_plr import (
     compute_gae,
-    # TrainState,
     evaluate_rnn,
-    # update_actor_critic_rnn,
-    # ActorCritic,
     setup_checkpointing,
-    compute_score
 )
-from sfl.util.ncc_utils import scale_y_by_ti_ada, ScaleByTiAdaState, ti_ada, projection_simplex_truncated
+from util.ncc_utils import projection_simplex_truncated
+from minigrid_ncc_regret import TrainState
 
 @struct.dataclass
 class SolvedEnvParams:
@@ -120,9 +115,6 @@ class ActorCritic(nn.Module):
     @staticmethod
     def initialize_carry(batch_dims):
         return nn.OptimizedLSTMCell(features=256).initialize_carry(jax.random.PRNGKey(0), (*batch_dims, 256))
-
-class TrainState(BaseTrainState):
-    sampler: core.FrozenDict[str, chex.ArrayTree] = struct.field(pytree_node=True)
 
 class BestIterateState(TrainState):
     """TrainState that also tracks the parameters with the lowest gradient norm."""
@@ -237,7 +229,7 @@ def update_actor_critic_rnn(
                 entropy = pi.entropy().mean()
 
                 policy_loss = -(log_probs_pred * targets).sum(0).mean() 
-                loss = policy_loss - entropy_coeff * entropy
+                loss = policy_loss
 
                 return loss, {"policy_loss": policy_loss, "entropy":entropy}
 
@@ -504,7 +496,7 @@ def main(config):
         return jax.vmap(env.optimal_value, in_axes=(0, None, None))(init_state, gamma, env_params)
 
     @partial(jax.jit, static_argnums=(2, ))
-    def learnability_fn(rng, levels, num_envs, train_state):
+    def score_fn(rng, levels, num_envs, train_state):
         def rollout_fn(rng):
 
             # Get the scores of the levels
@@ -543,7 +535,7 @@ def main(config):
         new_levels = jax.vmap(sample_random_level)(jax.random.split(_rng, config["NUM_ENVS"]))
 
         rng, _rng = jax.random.split(rng)
-        new_level_scores, max_returns = learnability_fn(_rng, new_levels, config["NUM_ENVS"], train_state)
+        new_level_scores, max_returns = score_fn(_rng, new_levels, config["NUM_ENVS"], train_state)
 
         idxs = jnp.flipud(jnp.argsort(new_level_scores))
 
@@ -578,10 +570,8 @@ def main(config):
         network_params = network.init(rng, init_x, ActorCritic.initialize_carry((config["NUM_ENVS"],)))
 
         tx = optax.chain(
-                # optax.clip_by_global_norm(config["MAX_GRAD_NORM"]),
-                # optax.adagrad(learning_rate=linear_schedule)
-                # optax.scale(-config["LR"])
-                optax.scale_by_schedule(lambda t: -linear_schedule(t)),
+                # optax.scale_by_schedule(lambda t: -linear_schedule(t)),
+                optax.scale(-config["LR"])
         )
         rng, _rng = jax.random.split(rng)
         init_levels = jax.vmap(sample_random_level)(jax.random.split(_rng, config["PLR_PARAMS"]["capacity"]))
@@ -595,30 +585,30 @@ def main(config):
     
     def train_step(carry: Tuple[chex.PRNGKey, TrainState], _):
 
-        rng, train_state, xhat = carry
+        rng, train_state = carry
 
-        # Use the old y so that x and y's updates are simultaneous
-        new_score = xhat
-
-        # Update the level sampler
-        levels = train_state.sampler["levels"]
+        # Get y's gradient
         rng, _rng = jax.random.split(rng)
-        scores, _ = learnability_fn(_rng, levels, config["PLR_PARAMS"]["capacity"], train_state)
+        scores, _ = score_fn(_rng, levels, config["PLR_PARAMS"]["capacity"], train_state)
 
-        def grad_fn(y):
-            return y.T @ scores - config["META_REG"] * y.T @ jnp.log(y) # jnp.square(optax.safe_norm(x, 0, 2))
-        
-        grad = jax.grad(grad_fn)(xhat)
-        xhat = projection_simplex_truncated(xhat + grad * config["META_LR"], config["META_TRUNC"])
+        rng, _rng = jax.random.split(rng)
+        new_sampler = {**train_state.sampler, "scores": scores} if config["STATIC_BUFFER"] else replace_fn(_rng, train_state, scores)
 
-        sampler = {**train_state.sampler, "scores": new_score}
-        # Collect trajectories on replay levels
+        y_obj_fn = lambda y: y.T @ new_sampler["scores"] - config["META_REG"] * jnp.log(y).T @ y
+        grad = jax.grad(y_obj_fn)(train_state.y)
+        grad, y_opt_state = train_state.y_tx.update(grad, train_state.y_opt_state)
+        new_y = projection_simplex_truncated(train_state.y + grad, config["META_TRUNC"])
+
+        # Collect trajectories on sampled levels
+        # NOTE: we sample from the last iteration's y distribution for theoretical reasons
+        #       ^although this may not perform as well emppirically, and there is active research
+        #       ^on the properties of alternating TTSGDA
         rng, rng_levels, rng_reset = jax.random.split(rng, 3)
-        sampler, (level_inds, levels) = level_sampler.sample_replay_levels(sampler, rng_levels, config["NUM_ENVS"])
+        _, (_, levels) = level_sampler.sample_replay_levels({**train_state.sampler, "scores":train_state.y}, rng_levels, config["NUM_ENVS"])
         init_obs, init_env_state = jax.vmap(env.reset_to_level, in_axes=(0, 0, None))(jax.random.split(rng_reset, config["NUM_ENVS"]), levels, env_params)
         (
-            (rng, train_state, hstate, last_obs, last_env_state, last_value, disc_return),
-            (obs, actions, rewards, dones, log_probs, values, info),
+            (rng, train_state, _, _, _, last_value, _),
+            (obs, actions, rewards, dones, log_probs, values, _),
         ) = sample_trajectories_rnn(
             rng,
             env,
@@ -644,6 +634,7 @@ def main(config):
             return jax.lax.scan(loop, jnp.zeros_like(rewards[0]), (rewards, dones), reverse=True)[1]
 
         targets = compute_returns(rewards, dones)
+
         # Update the policy using trajectories collected from replay levels
         (rng, train_state), losses = update_actor_critic_rnn(
             rng,
@@ -664,13 +655,21 @@ def main(config):
         metrics = {
             **losses,
             "mean_num_blocks": levels.wall_map.sum() / config["NUM_ENVS"],
-            "meta_entropy": -jnp.dot(sampler["scores"], jnp.log(sampler["scores"] + 1e-6)),
-            "meta_loss": grad_fn(new_score),
+            "meta_entropy": -jnp.dot(new_y, jnp.log(new_y)),
+            "meta_loss": y_obj_fn(new_y),
             "best_grad_norm": train_state.best_grad_norm,
-            "adv_grad_norm": jnp.linalg.norm(new_score - projection_simplex_truncated(new_score + config["META_LR"] * jax.grad(grad_fn)(new_score), config["META_TRUNC"]))
+            "adv_grad_norm": jnp.linalg.norm(new_y - train_state.y, ord=2)
         }
+        
+        train_state = train_state.replace(
+            sampler = new_sampler,
+            y = new_y,
+            y_opt_state = y_opt_state,
+            num_updates=train_state.num_updates + 1,
+        )
 
-        return (rng, train_state, xhat), metrics
+        return (rng, train_state), metrics
+    
     
     def eval(rng: chex.PRNGKey, train_state: TrainState):
         """
@@ -721,7 +720,7 @@ def main(config):
             It returns the updated train state, and a dictionary of metrics.
         """
         # Train
-        (rng, train_state, xhat), metrics = jax.lax.scan(train_step, runner_state, None, config["EVAL_FREQ"])
+        (rng, train_state), metrics = jax.lax.scan(train_step, runner_state, None, config["EVAL_FREQ"])
 
         # Eval (BEST)
         rng, rng_eval = jax.random.split(rng)
@@ -750,7 +749,6 @@ def main(config):
         metrics["best_eval_solve_rates"] = best_eval_solve_rates
         metrics["eval_ep_lengths"]  = episode_lengths
         metrics["eval_animation"] = (frames, episode_lengths)
-        # metrics["replay_levels"] = jax.vmap(env_renderer.render_level, (0, None))(train_state.replay_last_level_batch, env_params)
         
         # Eval (Random Levels)
         rng, rng_eval = jax.random.split(rng)
@@ -763,7 +761,7 @@ def main(config):
         metrics["highest_scoring_level"] = env_renderer.render_level(highest_scoring_level, env_params)
         metrics["highest_weighted_level"] = env_renderer.render_level(highest_weighted_level, env_params)
         
-        return (rng, train_state, xhat), metrics
+        return (rng, train_state), metrics
     
     def eval_checkpoint(og_config):
         """
@@ -794,9 +792,8 @@ def main(config):
     rng = jax.random.PRNGKey(config["SEED"])
     rng_init, rng_train = jax.random.split(rng)
     train_state = create_train_state(rng_init)
-
-    xhat = grad = jnp.full_like(train_state.sampler["scores"], 1 / len(train_state.sampler["scores"]), dtype=jnp.float32)
-    runner_state = (rng_train, train_state, xhat)
+    
+    runner_state = (rng_train, train_state)
     
     # And run the train_eval_sep function for the specified number of updates
     if config["CHECKPOINT_SAVE_INTERVAL"] > 0:

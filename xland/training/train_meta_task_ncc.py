@@ -70,6 +70,7 @@ class TrainConfig:
     # agent
     meta_trunc: float = 1e-5
     meta_lr: float = 1e-3
+    meta_reg: float = 0.0
 
     action_emb_dim: int = 16
     rnn_hidden_dim: int = 1024
@@ -93,6 +94,7 @@ class TrainConfig:
     #eval
     eval_num_envs: int = 512
     eval_num_episodes: int = 10
+    num_eval_steps: int = 500
     eval_seed: int = 42
     train_seed: int = 42
     checkpoint_path: Optional[str] = "checkpoints"
@@ -131,10 +133,100 @@ class TrainConfig:
         print(f"Num devices: {num_devices}, Num meta updates: {self.num_meta_updates}")
 
 class TrainState(BaseTrainState):
+    # === UED ===
     sampler: core.FrozenDict[str, chex.ArrayTree] = struct.field(pytree_node=True)
+
+    # === NCC Adversary ===
+    y: chex.Array = struct.field(pytree_node=True)
+    y_tx = struct.field(pytree_node=False)
+    y_opt_state: ScaleByTiAdaState = struct.field(pytree_node=True)
+    
     # === Below is used for logging ===
-    num_dr_updates: int
-    num_replay_updates: int
+    num_updates: int
+    replay_last_level_batch: chex.ArrayTree = struct.field(pytree_node=True)
+
+    @classmethod
+    def create(cls, *, apply_fn, params, tx, sampler, y, y_tx, num_updates, **kwargs):
+        orig_ts = super().create(
+            apply_fn = apply_fn,
+            params=params,
+            tx = tx
+        )
+
+        return cls(
+            step=0,
+            apply_fn=apply_fn,
+            params=params,
+            tx = tx,
+            opt_state=orig_ts.opt_state,
+            sampler=sampler,
+            y=y,
+            y_tx = y_tx,
+            y_opt_state = y_tx.init(y),
+            num_updates=num_updates
+        )
+
+def rollout_nsteps_score(
+    rng: jax.Array,
+    env: Environment,
+    env_params: EnvParams,
+    train_state: TrainState,
+    init_hstate: jax.Array,
+    num_steps: int = 500
+):
+    """ Rollout for `num_steps` environment steps """
+
+    def _env_step(carry, unused):
+        rng, prev_timestep, prev_action, prev_reward, hstate = carry
+
+        rng, _rng = jax.random.split(rng)
+        dist, value, hstate = train_state.apply_fn(
+            train_state.params,
+            {
+                "observation": prev_timestep.observation[None, None, ...],
+                "prev_action": prev_action[None, None, ...],
+                "prev_reward": prev_reward[None, None, ...],
+            },
+            hstate,
+        )
+        action, log_prob = dist.sample_and_log_prob(seed=_rng)
+        action, value, log_prob = action.squeeze(), value.squeeze(1), log_prob.squeeze(1)
+        timestep = env.step(env_params, prev_timestep, action)
+        carry = (rng, timestep, action, timestep.reward, hstate)
+        return carry, Transition(
+            done=jnp.zeros_like(timestep.last()),
+            ep_done=timestep.last(),
+            action=action,
+            value=value,
+            reward=timestep.reward,
+            log_prob=log_prob,
+            obs=prev_timestep.observation,
+            prev_action=prev_action,
+            prev_reward=prev_reward,
+        )
+
+    timestep = env.reset(env_params, rng)
+    prev_action = jnp.asarray(0)
+    prev_reward = jnp.asarray(0)
+    init_carry = (rng, timestep, prev_action, prev_reward, init_hstate)
+
+    final_carry, transitions = jax.lax.scan(_env_step, init_carry, None, length=num_steps)
+
+     # CALCULATE ADVANTAGE
+    rng, timestep, prev_action, prev_reward, hstate = final_carry
+    # calculate value of the last step for bootstrapping
+    _, last_val, _ = train_state.apply_fn(
+        train_state.params,
+        {
+                "observation": timestep.observation[None, None, ...],
+                "prev_action": prev_action[None, None, ...],
+                "prev_reward": prev_reward[None, None, ...],
+        },
+        hstate,
+    )
+
+    return transitions, last_val
+    
     
 class Transition(struct.PyTreeNode):
     done: jax.Array
@@ -157,9 +249,9 @@ class UEDTrajBatch(struct.PyTreeNode):
 
 def compute_score(score_fn, dones, values, max_returns, advantages):
     if score_fn == "MaxMC":
-        return max_mc(dones, values, max_returns)
+        return max_mc(dones, values, max_returns, 0.0)
     elif score_fn == "pvl":
-        return positive_value_loss(dones, advantages)
+        return positive_value_loss(dones, advantages, 0.0)
     else:
         raise ValueError(f"Unknown score function: {score_fn}")
 
@@ -252,13 +344,21 @@ def make_states(config: TrainConfig):
     pholder_level = benchmark.sample_ruleset(_rng)
     sampler = None # level_sampler.initialize(pholder_level, {"max_return": -jnp.inf})
     
-    
-    train_state = TrainState.create(apply_fn=network.apply, params=network_params, tx=tx, sampler=sampler, num_dr_updates=0, num_replay_updates=0)
-
+    init_y = jnp.full((config.buffer_capacity,), 1 / config.buffer_capacity, dtype=jnp.float32)
     y_ti_ada = scale_y_by_ti_ada(eta=config.meta_lr)
-    y_opt_state = y_ti_ada.init(jnp.zeros(config.buffer_capacity))
+    y_opt_state = y_ti_ada.init(init_y)
+    train_state = TrainState.create(
+        apply_fn=network.apply, 
+        params=network_params, 
+        tx=tx, 
+        sampler=sampler, 
+        num_updates=0,
+        y=init_y,
+        y_tx=y_ti_ada,
+        y_opt_state=y_opt_state
+    )
 
-    return rng, env, env_params, benchmark, level_sampler, init_hstate, train_state, y_ti_ada, y_opt_state
+    return rng, env, env_params, benchmark, level_sampler, init_hstate, train_state
 
 
 def make_train(
@@ -288,60 +388,63 @@ def make_train(
             log_dict.update({f"images/{i}_level": wandb.Image(np.array(img))})
         print('step', step)
         wandb.log(log_dict, step=step)
-
-    y_ti_ada = scale_y_by_ti_ada(eta=config.meta_lr)
         
     @partial(jax.pmap, axis_name="devices")
     def train(
         rng: jax.Array,
         train_state: TrainState,
         init_hstate: jax.Array,
-        y_opt_state: dict
     ):
-        def _sample_rulesets_from_buffer(rng, train_state: TrainState):
-            sampler = train_state.sampler
-            sampler, (level_idxs, levels) = level_sampler.sample_replay_levels(sampler, rng, config.num_envs_per_device)
-            return sampler, levels, level_idxs
-        
-        def _sample_new_rulesets(rng, train_state: TrainState):
-            ruleset_rng = jax.random.split(rng, num=config.num_envs_per_device)
-            levels = jax.vmap(benchmark.sample_ruleset)(ruleset_rng)
-            return train_state.sampler, levels, jnp.zeros(config.num_envs_per_device, dtype=jnp.int32)
-                           
-        def _update_buffer_with_replay_levels(sampler, levels, level_idxs, scores_by_level, max_returns_by_level):
-            sampler = level_sampler.update_batch(sampler, level_idxs, scores_by_level, {"max_return": max_returns_by_level}) 
-            return sampler
-        
-        def _update_buffer_with_new_levels(sampler, levels, level_idxs, scores_by_level, max_returns_by_level):
-            sampler, _ = level_sampler.insert_batch(sampler, levels, scores_by_level, {"max_return": max_returns_by_level})
-            return sampler
 
-        def learnability_fn(rng, rulesets, num_envs, train_state):
-
-            eval_env_params = env_params.replace(ruleset=rulesets)
-            def rollout_fn(rng):
+        def score_fn(rng, rulesets, num_envs, train_state):
+            
+            if config.ued_score_function == "MaxMC" or config.ued_score_function == "pvl":
+                
+                eval_env_params = env_params.replace(ruleset=rulesets)
 
                 eval_reset_rng = jax.random.split(rng, num=num_envs)
 
-                eval_stats = jax.vmap(rollout, in_axes=(0, None, 0, None, None, None))(
+                eval_trajs, last_vals = jax.vmap(rollout_nsteps_score, in_axes=(0, None, 0, None, None, None))(
                     eval_reset_rng,
                     env,
                     eval_env_params,
                     train_state,
-                    # TODO: make this a static method?
                     jnp.zeros((1, config.rnn_num_layers, config.rnn_hidden_dim)),
-                    1, # num_consecutive_episodes
+                    config.num_eval_steps
                 )
 
-                return eval_stats.success, eval_stats.reward
+                transitions = jax.tree_util.tree_map(lambda x: x.swapaxes(0, 1).squeeze(), eval_trajs)
+                advantages, targets = calculate_gae(transitions, last_vals.squeeze(), config.gamma, config.gae_lambda)
+                max_returns = compute_max_returns(transitions.ep_done, transitions.reward)
+                scores = compute_score(config.ued_score_function, transitions.ep_done, transitions.value, max_returns, advantages)
 
-            rng, _rng = jax.random.split(rng)
-            sucesses, returns = jax.vmap(rollout_fn)(jax.random.split(_rng, num=config.eval_num_episodes))
+                return scores, max_returns
+    
+            else:
+                eval_env_params = env_params.replace(ruleset=rulesets)
+                def rollout_fn(rng):
 
-            p = sucesses.mean(axis=0)
-            scores = p * (1 - p)
+                    eval_reset_rng = jax.random.split(rng, num=num_envs)
 
-            return scores, returns.max(axis=0)
+                    eval_stats = jax.vmap(rollout, in_axes=(0, None, 0, None, None, None))(
+                        eval_reset_rng,
+                        env,
+                        eval_env_params,
+                        train_state,
+                        # TODO: make this a static method?
+                        jnp.zeros((1, config.rnn_num_layers, config.rnn_hidden_dim)),
+                        1, # num_consecutive_episodes
+                    )
+
+                    return eval_stats.success, eval_stats.reward
+
+                rng, _rng = jax.random.split(rng)
+                sucesses, returns = jax.vmap(rollout_fn)(jax.random.split(_rng, num=config.eval_num_episodes))
+
+                p = sucesses.mean(axis=0)
+                scores = p * (1 - p)
+
+                return scores, returns.max(axis=0)
 
         def replace_fn(rng, train_state, old_level_scores):
             # NOTE: scores here are the actual UED scores, NOT the probabilities induced by the projection
@@ -352,7 +455,7 @@ def make_train(
             new_levels = jax.vmap(benchmark.sample_ruleset)(ruleset_rng)
 
             rng, _rng = jax.random.split(rng)
-            new_level_scores, max_returns = learnability_fn(_rng, new_levels, config.eval_num_envs_per_device, train_state)
+            new_level_scores, max_returns = score_fn(_rng, new_levels, config.eval_num_envs_per_device, train_state)
 
             idxs = jnp.flipud(jnp.argsort(new_level_scores))
 
@@ -369,28 +472,26 @@ def make_train(
 
         # META TRAIN LOOP
         def _meta_step(meta_state, update_idx):
-            rng, train_state, xhat, prev_grad, y_opt_state = meta_state
+            rng, train_state = meta_state
 
-            # save y so we can update x and y simultaneously
-            new_score = xhat
-            levels = train_state.sampler["levels"]
-            rng, _rng1, _rng2, _rng3 = jax.random.split(rng, num=4)
-
-            # Update the level sampler
-            rng, _rng = jax.random.split(rng)
-            scores, _ = learnability_fn(_rng, train_state.sampler["levels"], config.buffer_capacity, train_state)
+            # Get y's gradient
+            rng, _rng, _rng3 = jax.random.split(rng, 3)
+            scores, _ = score_fn(_rng, train_state.sampler["levels"], config.buffer_capacity, train_state)
 
             rng, _rng = jax.random.split(rng)
-
             new_sampler  = {**train_state.sampler, "scores": scores} if config.static_buffer else replace_fn(_rng, train_state, scores)
 
-            grad, y_opt_state = y_ti_ada.update(new_sampler["scores"], y_opt_state)
-            xhat = projection_simplex_truncated(xhat + grad, config.meta_trunc)
-            
-            # sample rulesets for this meta update
-            sampler = {**train_state.sampler, "scores": new_score}
-            rng, _rng = jax.random.split(rng)
-            sampler, (level_idxs, rulesets) = level_sampler.sample_replay_levels(sampler, _rng, config.num_envs_per_device)
+            y_obj_fn = lambda y: y.T @ new_sampler["scores"] - config.meta_reg * jnp.log(y).T @ y
+            grad = jax.grad(y_obj_fn)(train_state.y)
+            grad, y_opt_state = train_state.y_tx.update(grad, train_state.y_opt_state)
+            new_y = projection_simplex_truncated(train_state.y + grad, config.meta_trunc)
+
+            # Collect trajectories on sampled levels
+            # NOTE: we sample from the last iteration's y distribution for theoretical reasons
+            #       ^although this may not perform as well emppirically, and there is active research
+            #       ^on the properties of alternating TTSGDA
+            rng, rng_levels = jax.random.split(rng)
+            _, (_, rulesets) = level_sampler.sample_replay_levels({**train_state.sampler, "scores":train_state.y}, rng_levels, config.num_envs_per_device)
 
             meta_env_params = env_params.replace(ruleset=rulesets)
 
@@ -521,7 +622,12 @@ def make_train(
             rng, train_state = runner_state[:2]
             # WARN: do not forget to get updated params
 
-            train_state = train_state.replace(sampler = new_sampler)
+            train_state = train_state.replace(
+                sampler = new_sampler,
+                y = new_y,
+                y_opt_state = y_opt_state,
+                num_updates=train_state.num_updates + 1,
+            )
             
             outcomes = runner_state[-2]
             success_rate = outcomes.at[:, 1].get() / outcomes.at[:, 0].get()
@@ -579,18 +685,16 @@ def make_train(
             
             jax.experimental.io_callback(_callback, None, loss_info)
             
-            meta_state = (rng, train_state, xhat, grad, y_opt_state)
+            meta_state = (rng, train_state)
             return meta_state, loss_info
 
         rng, _rng = jax.random.split(rng)
         ruleset_rng = jax.random.split(_rng, num=config.buffer_capacity)
         levels = jax.vmap(benchmark.sample_ruleset)(ruleset_rng)
         sampler = level_sampler.initialize(levels, {"max_return": jnp.full(config.buffer_capacity, -jnp.inf)})
-        xhat = sampler["scores"]
-        grad = jnp.zeros_like(xhat)
-        meta_state = (rng, train_state.replace(sampler = sampler), xhat, grad, y_opt_state)
+        meta_state = (rng, train_state.replace(sampler = sampler))
         meta_state, loss_info = jax.lax.scan(_meta_step, meta_state, jnp.arange(config.num_meta_updates), config.num_meta_updates)
-        return {"state": meta_state[-1], "loss_info": loss_info}
+        return {"state": meta_state[1], "loss_info": loss_info}
 
     return train
 
@@ -609,17 +713,16 @@ def train(config: TrainConfig):
     if config.checkpoint_path is not None and os.path.exists(config.checkpoint_path):
         shutil.rmtree(config.checkpoint_path)
 
-    rng, env, env_params, benchmark, level_sampler, init_hstate, train_state, y_opt_state, y_ti_ada = make_states(config)
+    rng, env, env_params, benchmark, level_sampler, init_hstate, train_state = make_states(config)
     # replicating args across devices
     rng = jax.random.split(rng, num=jax.local_device_count())
     train_state = replicate(train_state, jax.local_devices())
     init_hstate = replicate(init_hstate, jax.local_devices())
-    y_opt_state = replicate(y_ti_ada, jax.local_devices())
 
     print("Compiling...")
     t = time.time()
     train_fn = make_train(env, env_params, benchmark, level_sampler, config)
-    train_fn = train_fn.lower(rng, train_state, init_hstate, y_opt_state).compile()
+    train_fn = train_fn.lower(rng, train_state, init_hstate).compile()
     elapsed_time = time.time() - t
     print(f"Done in {elapsed_time:.2f}s.")
 
@@ -637,15 +740,15 @@ def train(config: TrainConfig):
 
     if config.checkpoint_path is not None:
         params = train_info["state"].params
-        save_dir = os.path.join(config.checkpoint_path, "ncc", run.name)
+        save_dir = os.path.join(config.checkpoint_path, run.name)
         
         os.makedirs(save_dir, exist_ok=True)
-        save_params(params, f'{save_dir}/{config.seed}.safetensors')
+        save_params(params, f'{save_dir}/model.safetensors')
         print(f'Parameters of saved in {save_dir}/model.safetensors')
         
         # upload this to wandb as an artifact   
         artifact = wandb.Artifact(f'{run.name}-checkpoint', type='checkpoint')
-        artifact.add_file(f'{save_dir}/{config.seed}.safetensors')
+        artifact.add_file(f'{save_dir}/model.safetensors')
         artifact.save()
         checkpoint = {"config": asdict(config), "params": unreplicate(train_info)["state"].params}
         orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()

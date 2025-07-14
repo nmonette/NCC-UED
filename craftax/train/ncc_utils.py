@@ -88,6 +88,10 @@ class ScaleByTiAdaState:
     exp_b1: float | None = 1.0
     exp_b2: float | None = 1.0
 
+    # for amssgrad version
+    nu_max: dict  = None
+
+
 def scale_x_by_ti_ada(
     vx0: float = 0.1,
     vy0: float = 0.1, # just pass in a zeros_like y_params
@@ -96,6 +100,7 @@ def scale_x_by_ti_ada(
     b1: float = 0.9,
     b2: float = 0.999,
     eps: float = 1e-5,
+    amsgrad: bool = False
 ):
     """
     https://openreview.net/pdf?id=zClyiZ5V6sL 
@@ -104,7 +109,12 @@ def scale_x_by_ti_ada(
     def init_fn(params):
         vx = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), params)
         prev_grad = jax.tree_util.tree_map(lambda x: jnp.zeros_like(x), params)
-        return ScaleByTiAdaState(vx, vy0, prev_grad = prev_grad)
+
+        nu_max = None
+        if amsgrad:
+            nu_max = prev_grad
+
+        return ScaleByTiAdaState(vx, vy0, prev_grad = prev_grad, nu_max = nu_max)
     
     def update_fn(x_updates, state, params=None):
 
@@ -123,6 +133,15 @@ def scale_x_by_ti_ada(
             lambda v: eta / (jax.lax.pow(v / jnp.sqrt(1 - exp_b2), alpha) + eps), vx
         )
 
+        nu_max = None
+        if amsgrad:
+            nu_max = jax.tree_util.tree_map(
+                lambda state_nu, nu: jnp.maximum(state_nu, nu / (1 - exp_b2)), state.nu_max, vx
+            )
+            coeff = jax.tree_util.tree_map(
+                lambda v: eta / (jax.lax.pow(v, alpha) + eps), nu_max# $ lambda v: eta / (jax.lax.pow(v, alpha) / jnp.sqrt(1 - exp_b2) + eps), vx
+            )
+
         bias_corrected_grad = jax.tree_util.tree_map(lambda m: m / (1 - exp_b1), grad)
     
         x_grad = jax.tree_util.tree_map(
@@ -134,53 +153,11 @@ def scale_x_by_ti_ada(
             state.vy, 
             prev_grad=grad,
             exp_b1=exp_b1,
-            exp_b2=exp_b2
+            exp_b2=exp_b2,
+            nu_max = nu_max
         )
 
         return x_grad, new_state
-
-    return optax.GradientTransformation(init_fn, update_fn)
-
-def scale_y_by_ti_ada(
-    vy0: float = 0.1, 
-    eta: float = 0.1,
-    beta: float = 0.40,
-    b1: float = 0.9,
-    b2: float = 0.999,
-    eps: float = 1e-5
-):
-    """
-    https://openreview.net/pdf?id=zClyiZ5V6sL 
-    assumes we are doing the adam version
-    """
-    def init_fn(params):
-        vx = None
-        prev_grad = vy = jnp.zeros_like(params)
-        return ScaleByTiAdaState(vx, vy, prev_grad = prev_grad)
-    
-    def update_fn(y_updates, state, params=None):
-
-        grad = tree_update_moment(y_updates, state.prev_grad, b1, 1)
-        vy = tree_update_moment_per_elem_norm(y_updates, state.vy, b2, 2)
-        
-        exp_b1 = state.exp_b1 * b1
-        exp_b2 = state.exp_b2 * b2
-
-        coeff = eta / (jax.lax.pow(vy, beta) / jnp.sqrt(1 - exp_b2) + eps)
-
-        bias_corrected_grad = grad / (1 - exp_b1)
-        
-        y_grad = bias_corrected_grad * coeff
-
-        new_state = ScaleByTiAdaState(
-            None, 
-            vy, 
-            prev_grad=grad,
-            exp_b1=exp_b1,
-            exp_b2=exp_b2
-        )
-
-        return y_grad, new_state
 
     return optax.GradientTransformation(init_fn, update_fn)
 
@@ -192,9 +169,10 @@ def ti_ada(
     b1: float = 0.9,
     b2: float = 0.999,
     eps: float = 1e-5, 
+    amsgrad: bool = False
 ):
     return optax.chain(
-        scale_x_by_ti_ada(vx0, vy0, 1.0, alpha, b1, b2, eps),
+        scale_x_by_ti_ada(vx0, vy0, 1.0, alpha, b1, b2, eps, amsgrad),
         optax.scale(-eta) if isinstance(eta, float) else optax.scale_by_schedule(lambda t: -eta(t)) 
     )
 
@@ -224,3 +202,43 @@ def projection_simplex_truncated(x: jnp.ndarray, eps: float) -> jnp.ndarray:
     i = jnp.expand_dims(generate_vmap(len(totals.shape) - 1, partial(jnp.searchsorted, v=1))(totals), -1)
     lam = (1 - jnp.take_along_axis(totals, i, -1)) / jnp.take_along_axis(active, i, -1) + jnp.take_along_axis(lambdas, i+1, -1)
     return jnp.clip(x + lam, eps, 1)
+
+@dataclass
+class ScaleByRssState:
+    """State holding the sum of gradient squares to date."""
+
+    sum_of_squares: dict
+
+
+def abs_sq(x: chex.Array) -> chex.Array:
+    return (x.conj() * x).real
+
+
+def scale_by_rss(initial_accumulator_value: float = 0.1, eps: float = 1e-7): 
+    def init_fn(params):
+        return ScaleByRssState(
+            sum_of_squares=jax.tree_util.tree_map(lambda x: jnp.full_like(x, initial_accumulator_value), params)
+        )
+
+    def update_fn(updates, state, params=None):
+        del params
+        sum_of_squares = jax.tree_util.tree_map(
+            lambda g, t: abs_sq(g) + t, updates, state.sum_of_squares
+        )
+        inv_sqrt_g_square = jax.tree_util.tree_map(
+            lambda t: jnp.where(t > 0, jax.lax.pow(t + eps, -0.4), 0.0), sum_of_squares
+        )
+        updates = jax.tree_util.tree_map(
+            lambda x,y: x * y, inv_sqrt_g_square, updates
+        )
+        return updates, ScaleByRssState(sum_of_squares=sum_of_squares)
+
+    return optax.GradientTransformation(init_fn, update_fn)
+
+def scale_y_by_ti_ada(
+    learning_rate: float = 1e-2
+):
+    return optax.chain(
+        scale_by_rss(),
+        optax.scale(-learning_rate) if isinstance(learning_rate, float) else optax.scale_by_schedule(lambda t: -learning_rate(t))
+    )

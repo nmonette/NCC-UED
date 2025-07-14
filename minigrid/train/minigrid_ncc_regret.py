@@ -24,25 +24,54 @@ import hydra
 from omegaconf import OmegaConf
 
 from jaxued.environments.underspecified_env import EnvParams, EnvState, Observation, UnderspecifiedEnv
-from jaxued.linen import ResetRNN
 from jaxued.environments import Maze, MazeSolved, MazeRenderer
-from jaxued.environments.maze import Level, make_level_generator, make_level_mutator_minimax
+from jaxued.environments.maze import Level, make_level_generator
 from jaxued.level_sampler import LevelSampler as BaseLevelSampler
-from jaxued.utils import compute_max_returns, max_mc, positive_value_loss
 from jaxued.wrappers import AutoReplayWrapper
 
-from sfl.util.jaxued.jaxued_utils import l1_value_loss
-from sfl.train.train_utils import save_params
-from sfl.train.minigrid_plr import (
+from train_utils import save_params
+from minigrid_plr import (
     compute_gae,
-    TrainState,
     evaluate_rnn,
     update_actor_critic_rnn,
     ActorCritic,
     setup_checkpointing,
-    compute_score
 )
-from sfl.util.ncc_utils import scale_y_by_ti_ada, ScaleByTiAdaState, ti_ada, projection_simplex_truncated
+from util.ncc_utils import scale_y_by_ti_ada, ScaleByTiAdaState, ti_ada, projection_simplex_truncated
+
+class TrainState(BaseTrainState):
+    # === UED ===
+    sampler: core.FrozenDict[str, chex.ArrayTree] = struct.field(pytree_node=True)
+
+    # === NCC Adversary ===
+    y: chex.Array = struct.field(pytree_node=True)
+    y_tx = struct.field(pytree_node=False)
+    y_opt_state: ScaleByTiAdaState = struct.field(pytree_node=True)
+    
+    # === Below is used for logging ===
+    num_updates: int
+    replay_last_level_batch: chex.ArrayTree = struct.field(pytree_node=True)
+
+    @classmethod
+    def create(cls, *, apply_fn, params, tx, sampler, y, y_tx, num_updates, **kwargs):
+        orig_ts = super().create(
+            apply_fn = apply_fn,
+            params=params,
+            tx = tx
+        )
+
+        return cls(
+            step=0,
+            apply_fn=apply_fn,
+            params=params,
+            tx = tx,
+            opt_state=orig_ts.opt_state,
+            sampler=sampler,
+            y=y,
+            y_tx = y_tx,
+            y_opt_state = y_tx.init(y),
+            num_updates=num_updates
+        )
 
 @struct.dataclass
 class SolvedEnvParams:
@@ -168,9 +197,6 @@ class LevelSampler(BaseLevelSampler):
         return sampler
 
 
-class TrainState(BaseTrainState):
-    sampler: core.FrozenDict[str, chex.ArrayTree] = struct.field(pytree_node=True)
-
 @hydra.main(version_base=None, config_path="config", config_name="minigrid-ncc-reg")
 def main(config):
 
@@ -260,7 +286,7 @@ def main(config):
         return jax.vmap(env.optimal_value, in_axes=(0, None, None))(init_state, gamma, env_params)
 
     @partial(jax.jit, static_argnums=(2, ))
-    def learnability_fn(rng, levels, num_envs, train_state):
+    def score_fn(rng, levels, num_envs, train_state):
         def rollout_fn(rng):
 
             # Get the scores of the levels
@@ -299,7 +325,7 @@ def main(config):
         new_levels = jax.vmap(sample_random_level)(jax.random.split(_rng, config["NUM_ENVS"]))
 
         rng, _rng = jax.random.split(rng)
-        new_level_scores, max_returns = learnability_fn(_rng, new_levels, config["NUM_ENVS"], train_state)
+        new_level_scores, max_returns = score_fn(_rng, new_levels, config["NUM_ENVS"], train_state)
 
         idxs = jnp.flipud(jnp.argsort(new_level_scores))
 
@@ -340,26 +366,49 @@ def main(config):
         rng, _rng = jax.random.split(rng)
         init_levels = jax.vmap(sample_random_level)(jax.random.split(_rng, config["PLR_PARAMS"]["capacity"]))
         sampler = level_sampler.initialize(init_levels, {"max_return": jnp.full(config["PLR_PARAMS"]["capacity"], -jnp.inf)})
+
+        # Set up y optimizer state
+        init_y = jnp.full((config["PLR_PARAMS"]["capacity"],), 1 / config["PLR_PARAMS"]["capacity"], dtype=jnp.float32)
+        y_ti_ada = scale_y_by_ti_ada(eta=config["META_LR"])
+        y_opt_state = y_ti_ada.init(init_y)
+
         return TrainState.create(
             apply_fn=network.apply,
             params=network_params,
             tx=tx,
             sampler=sampler,
+            num_updates=0,
+            y=init_y,
+            y_tx = y_ti_ada,
+            y_opt_state=y_opt_state,
         )
     
     def train_step(carry: Tuple[chex.PRNGKey, TrainState], _):
 
-        rng, train_state, xhat, prev_grad, y_opt_state = carry
+        rng, train_state = carry
 
-        new_score = xhat 
-        sampler = {**train_state.sampler, "scores": new_score}
-        # Collect trajectories on replay levels
+        # Get y's gradient
+        rng, _rng = jax.random.split(rng)
+        scores, _ = score_fn(_rng, levels, config["PLR_PARAMS"]["capacity"], train_state)
+
+        rng, _rng = jax.random.split(rng)
+        new_sampler = {**train_state.sampler, "scores": scores} if config["STATIC_BUFFER"] else replace_fn(_rng, train_state, scores)
+
+        y_obj_fn = lambda y: y.T @ new_sampler["scores"] - config["META_REG"] * jnp.log(y).T @ y
+        grad = jax.grad(y_obj_fn)(train_state.y)
+        grad, y_opt_state = train_state.y_tx.update(grad, train_state.y_opt_state)
+        new_y = projection_simplex_truncated(train_state.y + grad, config["META_TRUNC"])
+
+        # Collect trajectories on sampled levels
+        # NOTE: we sample from the last iteration's y distribution for theoretical reasons
+        #       ^although this may not perform as well emppirically, and there is active research
+        #       ^on the properties of alternating TTSGDA
         rng, rng_levels, rng_reset = jax.random.split(rng, 3)
-        sampler, (level_inds, levels) = level_sampler.sample_replay_levels(sampler, rng_levels, config["NUM_ENVS"])
+        _, (_, levels) = level_sampler.sample_replay_levels({**train_state.sampler, "scores":train_state.y}, rng_levels, config["NUM_ENVS"])
         init_obs, init_env_state = jax.vmap(env.reset_to_level, in_axes=(0, 0, None))(jax.random.split(rng_reset, config["NUM_ENVS"]), levels, env_params)
         (
-            (rng, train_state, hstate, last_obs, last_env_state, last_value, disc_return),
-            (obs, actions, rewards, dones, log_probs, values, info),
+            (rng, train_state, _, _, _, last_value, _),
+            (obs, actions, rewards, dones, log_probs, values, _),
         ) = sample_trajectories_rnn(
             rng,
             env,
@@ -389,31 +438,22 @@ def main(config):
             config["VF_COEF"],
             update_grad=True,
         )
-        
-        # Update the level sampler
-        levels = sampler["levels"]
-        rng, _rng = jax.random.split(rng)
-        scores, _ = learnability_fn(_rng, levels, config["PLR_PARAMS"]["capacity"], train_state)
-
-        rng, _rng = jax.random.split(rng)
-        new_sampler = replace_fn(_rng, train_state, scores)
-        sampler = {**new_sampler, "scores": new_score}
-
-        grad_fn = jax.grad(lambda y: y.T @ new_sampler["scores"] - config["META_REG"] * jnp.log(y + 1e-6).T @ y)
-        grad = grad_fn(new_score)
-        grad, y_opt_state = y_ti_ada.update(grad, y_opt_state)
-        xhat = projection_simplex_truncated(xhat + grad, config["META_TRUNC"])
 
         metrics = {
             "losses": jax.tree_map(lambda x: x.mean(), losses),
             "mean_num_blocks": levels.wall_map.sum() / config["NUM_ENVS"],
-            "meta_entropy": -jnp.dot(sampler["scores"], jnp.log(sampler["scores"] + 1e-6)),
-            "meta_loss": (lambda y: y.T @ new_sampler["scores"] - config["META_REG"] * jnp.log(y + 1e-6).T @ y)(new_score)
+            "meta_entropy": -jnp.dot(new_y, jnp.log(new_y)),
+            "meta_loss": (lambda y: y.T @ new_sampler["scores"] - config["META_REG"] * jnp.log(y.T @ y)(new_y))
         }
         
-        train_state = train_state.replace(sampler = sampler)
+        train_state = train_state.replace(
+            sampler = new_sampler,
+            y = new_y,
+            y_opt_state = y_opt_state,
+            num_updates=train_state.num_updates + 1,
+        )
 
-        return (rng, train_state, xhat, grad, y_opt_state), metrics
+        return (rng, train_state), metrics
     
     def eval(rng: chex.PRNGKey, train_state: TrainState):
         """
@@ -445,7 +485,7 @@ def main(config):
             It returns the updated train state, and a dictionary of metrics.
         """
         # Train
-        (rng, train_state, xhat, prev_grad, y_opt_state), metrics = jax.lax.scan(train_step, runner_state, None, config["EVAL_FREQ"])
+        (rng, train_state), metrics = jax.lax.scan(train_step, runner_state, None, config["EVAL_FREQ"])
 
         # Eval
         rng, rng_eval = jax.random.split(rng)
@@ -464,7 +504,6 @@ def main(config):
         metrics["eval_solve_rates"] = eval_solve_rates
         metrics["eval_ep_lengths"]  = episode_lengths
         metrics["eval_animation"] = (frames, episode_lengths)
-        # metrics["replay_levels"] = jax.vmap(env_renderer.render_level, (0, None))(train_state.replay_last_level_batch, env_params)
          
         highest_scoring_level = level_sampler.get_levels(train_state.sampler, train_state.sampler["scores"].argmax())
         highest_weighted_level = level_sampler.get_levels(train_state.sampler, level_sampler.level_weights(train_state.sampler).argmax())
@@ -472,7 +511,7 @@ def main(config):
         metrics["highest_scoring_level"] = env_renderer.render_level(highest_scoring_level, env_params)
         metrics["highest_weighted_level"] = env_renderer.render_level(highest_weighted_level, env_params)
         
-        return (rng, train_state, xhat, prev_grad, y_opt_state), metrics
+        return (rng, train_state), metrics
     
     def eval_checkpoint(og_config):
         """
@@ -503,14 +542,8 @@ def main(config):
     rng = jax.random.PRNGKey(config["SEED"])
     rng_init, rng_train = jax.random.split(rng)
     train_state = create_train_state(rng_init)
-
-    # Set up y optimizer state
-    y_ti_ada = scale_y_by_ti_ada(eta=config["META_LR"])
-    y_opt_state = y_ti_ada.init(jnp.zeros_like(train_state.sampler["scores"]))
         
-    grad = jnp.zeros_like(train_state.sampler["scores"])
-    xhat = jnp.full_like(grad, 1 / len(grad))
-    runner_state = (rng_train, train_state, xhat, grad, y_opt_state)
+    runner_state = (rng_train, train_state)
     
     # And run the train_eval_sep function for the specified number of updates
     if config["CHECKPOINT_SAVE_INTERVAL"] > 0:
