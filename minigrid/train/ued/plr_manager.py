@@ -2,9 +2,9 @@ import jax
 from jax import numpy as jnp
 import chex
 from functools import partial
-from sfl.train.ued.ued_utils import *
-from sfl.train.ued.map_buffer import MapBuffer
-from sfl.env.maps import Map
+train.ued.ued_utils import *
+train.ued.map_buffer import MapBuffer
+env.maps import Map
 
 class PLRManager:
     """ PLR Manager for multiple environments """

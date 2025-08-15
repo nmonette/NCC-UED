@@ -3,7 +3,7 @@ import chex
 import jax
 import jax.numpy as jnp
 
-from sfl.util.jaxued.jaxued_types import Level
+util.jaxued.jaxued_types import Level
 
 Prioritization = Literal["rank", "topk"]
 

@@ -18,7 +18,7 @@ USER root
 RUN apt-get update && \
     apt-get install -y tmux
 
-RUN pip install -e .
+RUN pip install jaxued
 
 # switch back to MY${MYUSER}# RUN chown -R ${MYUSER} /home/${MYUSER}
 # RUN chmod -R 777 /home/${MYUSER}

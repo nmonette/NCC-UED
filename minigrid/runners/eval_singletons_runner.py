@@ -16,7 +16,7 @@ import jax.numpy as jnp
 from jaxmarl.environments.jaxnav import make_jaxnav_singleton, make_jaxnav_singleton_collection, JaxNavSingleton
 from jaxmarl.environments.jaxnav.jaxnav_viz import JaxNavVisualizer
 
-from sfl.util.rolling_stats import RollingStats, LogEpisodicStats
+util.rolling_stats import RollingStats, LogEpisodicStats
 
 def batchify(x: dict, agent_list, num_actors):
     x = jnp.stack([x[a] for a in agent_list])

@@ -14,8 +14,8 @@ import optax
 import chex
 
 #from gymnax_blines.utils.ppo import policy, update, flatten_dims, update_epoch
-from sfl.train.train_utils.common import save_checkpoint
-from sfl.env.base_env import MultiAgentEnvironment
+train.train_utils.common import save_checkpoint
+env.base_env import MultiAgentEnvironment
 
 class RolloutManagerMultiAgent(object):
     """ Assuming each agent controlled by one policy, executed decentrally """

@@ -23,7 +23,7 @@ from jaxmarl.environments.jaxnav.jaxnav_viz import JaxNavVisualizer
 
 from jaxued.environments.maze.renderer import MazeRenderer
 
-from sfl.util.rolling_stats import LogEpisodicStats
+util.rolling_stats import LogEpisodicStats
 
 
 

@@ -31,8 +31,8 @@ from jaxued.utils import compute_max_returns, max_mc, positive_value_loss
 from jaxued.wrappers import AutoReplayWrapper
 
 
-from sfl.util.jaxued.jaxued_utils import l1_value_loss
-from sfl.train.train_utils import save_params
+util.jaxued.jaxued_utils import l1_value_loss
+train.train_utils import save_params
 
 class UpdateState(IntEnum):
     DR = 0

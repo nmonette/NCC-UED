@@ -13,7 +13,7 @@ from flax.linen.initializers import constant, orthogonal
 from typing import Sequence, NamedTuple, Any, Dict
 from flax.training.train_state import TrainState
 import hydra
-from sfl.train.minigrid_plr import ActorCritic, evaluate_rnn
+train.minigrid_plr import ActorCritic, evaluate_rnn
 from omegaconf import OmegaConf
 import os
 from functools import partial
@@ -26,7 +26,7 @@ from jaxued.environments import Maze, MazeRenderer
 from jaxued.wrappers import AutoReplayWrapper
 from jaxued.environments.maze import Level, make_level_generator
 
-from sfl.train.train_utils import save_params
+train.train_utils import save_params
 
 
 class Transition(NamedTuple):

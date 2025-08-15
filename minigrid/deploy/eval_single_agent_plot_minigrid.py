@@ -2,7 +2,7 @@
 import sys
 import os
 
-from sfl.train.minigrid_plr import ActorCritic
+train.minigrid_plr import ActorCritic
 sys.path.append(os.path.join(os.getcwd(), '..', '..'))
 import pickle
 import numpy as np

@@ -3,7 +3,7 @@ from matplotlib import pyplot as plt
 import numpy as np
 import pandas as pd
 import jax.numpy as jnp
-from sfl.deploy.plot_utils import _annotate_and_decorate_axis, plot_mean_std_xy
+deploy.plot_utils import _annotate_and_decorate_axis, plot_mean_std_xy
 
 ORDER = [
     "Learnability (ours)",

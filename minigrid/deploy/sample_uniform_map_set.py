@@ -18,9 +18,9 @@ from functools import partial
 import distrax
 
 from jaxmarl.environments.jaxnav.jaxnav_env import JaxNav, EnvInstance, listify_reward
-from sfl.train.train_utils import load_params
-from sfl.util.rolling_stats import LogEpisodicStats
-from sfl.train.common.network import ScannedRNN, _calculate_dormancy, DormancyActorCriticRNN
+train.train_utils import load_params
+util.rolling_stats import LogEpisodicStats
+train.common.network import ScannedRNN, _calculate_dormancy, DormancyActorCriticRNN
 
 class ActorCriticRNN(nn.Module):
     action_dim: Sequence[int]
