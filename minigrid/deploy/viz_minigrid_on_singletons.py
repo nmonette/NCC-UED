@@ -3,7 +3,7 @@
 import sys
 import os
 
-train.minigrid_plr import ActorCritic
+from train.minigrid_plr import ActorCritic
 # sys.path.append(os.path.join(os.getcwd(), '..', '..'))
 import pickle
 import numpy as np
@@ -20,12 +20,12 @@ from flax.traverse_util import flatten_dict, unflatten_dict
 from functools import partial
 import distrax 
 
-env.env import RobSimJAXMARL, State, EnvInstance, listify_reward, NUM_REWARD_COMPONENTS, REWARD_COMPONENT_DENSE, REWARD_COMPONENT_SPARSE
-runners.eval_runner import EvalSampledRunnerMinigrid
-train.utils import load_params
-util.rolling_stats import LogEpisodicStats
-train.common.network import ActorCriticRNN, ScannedRNN
-util.jaxued.jaxued_utils import compute_max_returns, max_mc, positive_value_loss, l1_value_loss, value_disagreement
+from env.env import RobSimJAXMARL, State, EnvInstance, listify_reward, NUM_REWARD_COMPONENTS, REWARD_COMPONENT_DENSE, REWARD_COMPONENT_SPARSE
+from runners.eval_runner import EvalSampledRunnerMinigrid
+from train.utils import load_params
+from util.rolling_stats import LogEpisodicStats
+from train.common.network import ActorCriticRNN, ScannedRNN
+from util.jaxued.jaxued_utils import compute_max_returns, max_mc, positive_value_loss, l1_value_loss, value_disagreement
 import pandas as pd
 from jaxued.environments.maze.env import Maze
 from jaxued.environments.maze.env_solved import MazeSolved

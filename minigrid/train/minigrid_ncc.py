@@ -25,15 +25,15 @@ from jaxued.environments.maze import Level, make_level_generator
 from jaxued.level_sampler import LevelSampler as BaseLevelSampler
 from jaxued.wrappers import AutoReplayWrapper
 
-from train_utils import save_params
-from minigrid_plr import (
+from .train_utils import save_params
+from .minigrid_plr import (
     compute_gae,
     evaluate_rnn,
     update_actor_critic_rnn,
     ActorCritic,
     setup_checkpointing,
 )
-from minigrid_ncc_regret import TrainState
+from .minigrid_ncc_regret import TrainState
 from util.ncc_utils import scale_y_by_ti_ada, ti_ada, projection_simplex_truncated
 
 def sample_trajectories_rnn(
@@ -158,6 +158,10 @@ class LevelSampler(BaseLevelSampler):
 
 class TrainState(BaseTrainState):
     sampler: core.FrozenDict[str, chex.ArrayTree] = struct.field(pytree_node=True)
+    y: chex.Array = struct.field(pytree_node=True)
+    y_tx: callable = struct.field(pytree_node=False)
+    y_opt_state: chex.ArrayTree = struct.field(pytree_node=True)
+    num_updates: int = struct.field(pytree_node=True, default=0)
 
 @hydra.main(version_base=None, config_path="config", config_name="minigrid-ncc")
 def main(config):
@@ -329,7 +333,7 @@ def main(config):
 
         # Set up y optimizer state
         init_y = jnp.full((config["PLR_PARAMS"]["capacity"],), 1 / config["PLR_PARAMS"]["capacity"], dtype=jnp.float32)
-        y_ti_ada = scale_y_by_ti_ada(eta=config["META_LR"])
+        y_ti_ada = scale_y_by_ti_ada(learning_rate=config["META_LR"])
         y_opt_state = y_ti_ada.init(init_y)
 
         return TrainState.create(
@@ -349,7 +353,7 @@ def main(config):
 
         # Get y's gradient
         rng, _rng = jax.random.split(rng)
-        scores, _ = learnability_fn(_rng, levels, config["PLR_PARAMS"]["capacity"], train_state)
+        scores, _ = learnability_fn(_rng, train_state.sampler["levels"], config["PLR_PARAMS"]["capacity"], train_state)
 
         rng, _rng = jax.random.split(rng)
         new_sampler = {**train_state.sampler, "scores": scores} if config["STATIC_BUFFER"] else replace_fn(_rng, train_state, scores)
@@ -403,7 +407,7 @@ def main(config):
             "losses": jax.tree_map(lambda x: x.mean(), losses),
             "mean_num_blocks": levels.wall_map.sum() / config["NUM_ENVS"],
             "meta_entropy": -jnp.dot(new_y, jnp.log(new_y)),
-            "meta_loss": (lambda y: y.T @ new_sampler["scores"] - config["META_REG"] * jnp.log(y.T @ y)(new_y))
+            "meta_loss": (lambda y: y.T @ new_sampler["scores"] - config["META_REG"] * jnp.log(y.T @ y))(new_y)
         }
         
         train_state = train_state.replace(

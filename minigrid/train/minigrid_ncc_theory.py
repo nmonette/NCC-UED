@@ -32,14 +32,14 @@ from jaxued.environments.maze import Level, make_level_generator, make_level_mut
 from jaxued.level_sampler import LevelSampler as BaseLevelSampler
 from jaxued.wrappers import AutoReplayWrapper
 
-from train_utils import save_params
-from minigrid_plr import (
+from .train_utils import save_params
+from .minigrid_plr import (
     compute_gae,
     evaluate_rnn,
     setup_checkpointing,
 )
 from util.ncc_utils import projection_simplex_truncated
-from minigrid_ncc_regret import TrainState
+from .minigrid_ncc_regret import TrainState
 
 @struct.dataclass
 class SolvedEnvParams:
@@ -241,7 +241,7 @@ def update_actor_critic_rnn(
                 # clip into (large) box constraints to ensure ipschitzness/stability as per https://openreview.net/pdf?id=Hygxb2CqKm
                 train_state = train_state.replace(
                     params=jax.tree_util.tree_map(
-                        lambda x: jnp.clip(x, min=-1000, max=1000), train_state.params
+                        lambda x: jnp.clip(x, -1000, 1000), train_state.params
                     )
                 )
                 # NOTE: if you would like you can also divide x by safe_norm(x, 1e-6, axis=0, keepdims=True) if you would like 
@@ -581,6 +581,11 @@ def main(config):
             params=network_params,
             tx=tx,
             sampler=sampler,
+            y_tx=optax.scale(config["META_LR"]),
+            y=jnp.full((config["PLR_PARAMS"]["capacity"],), 1 / config["PLR_PARAMS"]["capacity"], dtype=jnp.float32),
+            y_opt_state=optax.scale(config["META_LR"]).init(jnp.zeros((config["PLR_PARAMS"]["capacity"],), dtype=jnp.float32)),
+            num_updates=0,
+            replay_last_level_batch=None,
         )
     
     def train_step(carry: Tuple[chex.PRNGKey, TrainState], _):
@@ -589,7 +594,7 @@ def main(config):
 
         # Get y's gradient
         rng, _rng = jax.random.split(rng)
-        scores, _ = score_fn(_rng, levels, config["PLR_PARAMS"]["capacity"], train_state)
+        scores, _ = score_fn(_rng, train_state.sampler["levels"], config["PLR_PARAMS"]["capacity"], train_state)
 
         rng, _rng = jax.random.split(rng)
         new_sampler = {**train_state.sampler, "scores": scores} if config["STATIC_BUFFER"] else replace_fn(_rng, train_state, scores)

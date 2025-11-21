@@ -8,7 +8,7 @@ defaults:
 "GROUP_NAME": "minigrid-ncc"
 "ENTITY": ""
 "PROJECT": "minigrid"
-"WANDB_MODE" : "online"
+"WANDB_MODE" : "disabled"
 "SAVE_PATH": "checkpoints/new_minigrid"
 "CHECKPOINT_SAVE_INTERVAL": 0
 "META_LR": 0.1

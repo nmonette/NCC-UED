@@ -10,7 +10,7 @@ PLR_PARAMS:  # starting with the same as MiniGrid
   # temp: 0.3
   staleness_coeff: 0.3
   minimum_fill_ratio: 1.0
-  prioritization: "rank"
+  prioritization: "topk"
   prioritization_params:
     temperature: 1.0
     k: 1  

@@ -13,7 +13,7 @@ from flax.linen.initializers import constant, orthogonal
 from typing import Sequence, NamedTuple, Any, Dict
 from flax.training.train_state import TrainState
 import hydra
-train.minigrid_plr import ActorCritic, evaluate_rnn
+from train.minigrid_plr import ActorCritic, evaluate_rnn
 from omegaconf import OmegaConf
 import os
 from functools import partial
@@ -26,7 +26,7 @@ from jaxued.environments import Maze, MazeRenderer
 from jaxued.wrappers import AutoReplayWrapper
 from jaxued.environments.maze import Level, make_level_generator
 
-train.train_utils import save_params
+from train.train_utils import save_params
 
 
 class Transition(NamedTuple):
@@ -667,7 +667,17 @@ def main(config):
                         
         plt.tight_layout()
         fig.canvas.draw()
-        im = Image.frombytes('RGB', fig.canvas.get_width_height(), fig.canvas.tostring_rgb()) 
+
+        # Get RGBA buffer from canvas
+        buf = fig.canvas.buffer_rgba()
+        w, h = fig.canvas.get_width_height()
+
+        # Create PIL image from RGBA
+        im = Image.frombuffer("RGBA", (w, h), buf, "raw", "RGBA", 0, 1)
+
+        # Convert to RGB (optional, but WandB prefers RGB)
+        im = im.convert("RGB")
+
         wandb.log({"maps": wandb.Image(im)}, step=epoch)
     
     @jax.jit

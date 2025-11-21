@@ -5,7 +5,7 @@ Nonconvex-Concave Regret Optimization for UED
 import json
 import time
 from functools import partial
-from typing import Sequence, Tuple
+from typing import Sequence, Tuple, Any
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -29,8 +29,8 @@ from jaxued.environments.maze import Level, make_level_generator
 from jaxued.level_sampler import LevelSampler as BaseLevelSampler
 from jaxued.wrappers import AutoReplayWrapper
 
-from train_utils import save_params
-from minigrid_plr import (
+from .train_utils import save_params
+from .minigrid_plr import (
     compute_gae,
     evaluate_rnn,
     update_actor_critic_rnn,
@@ -45,7 +45,7 @@ class TrainState(BaseTrainState):
 
     # === NCC Adversary ===
     y: chex.Array = struct.field(pytree_node=True)
-    y_tx = struct.field(pytree_node=False)
+    y_tx: Any = struct.field(pytree_node=False)
     y_opt_state: ScaleByTiAdaState = struct.field(pytree_node=True)
     
     # === Below is used for logging ===
@@ -54,23 +54,19 @@ class TrainState(BaseTrainState):
 
     @classmethod
     def create(cls, *, apply_fn, params, tx, sampler, y, y_tx, num_updates, **kwargs):
-        orig_ts = super().create(
-            apply_fn = apply_fn,
-            params=params,
-            tx = tx
-        )
 
         return cls(
             step=0,
             apply_fn=apply_fn,
             params=params,
             tx = tx,
-            opt_state=orig_ts.opt_state,
+            opt_state=tx.init(params),
             sampler=sampler,
             y=y,
             y_tx = y_tx,
             y_opt_state = y_tx.init(y),
-            num_updates=num_updates
+            num_updates=num_updates,
+            replay_last_level_batch=kwargs.get('replay_last_level_batch', None),
         )
 
 @struct.dataclass
@@ -369,7 +365,7 @@ def main(config):
 
         # Set up y optimizer state
         init_y = jnp.full((config["PLR_PARAMS"]["capacity"],), 1 / config["PLR_PARAMS"]["capacity"], dtype=jnp.float32)
-        y_ti_ada = scale_y_by_ti_ada(eta=config["META_LR"])
+        y_ti_ada = scale_y_by_ti_ada(learning_rate=config["META_LR"])
         y_opt_state = y_ti_ada.init(init_y)
 
         return TrainState.create(
@@ -389,7 +385,7 @@ def main(config):
 
         # Get y's gradient
         rng, _rng = jax.random.split(rng)
-        scores, _ = score_fn(_rng, levels, config["PLR_PARAMS"]["capacity"], train_state)
+        scores, _ = score_fn(_rng, train_state.sampler["levels"], config["PLR_PARAMS"]["capacity"], train_state)
 
         rng, _rng = jax.random.split(rng)
         new_sampler = {**train_state.sampler, "scores": scores} if config["STATIC_BUFFER"] else replace_fn(_rng, train_state, scores)
@@ -443,7 +439,7 @@ def main(config):
             "losses": jax.tree_map(lambda x: x.mean(), losses),
             "mean_num_blocks": levels.wall_map.sum() / config["NUM_ENVS"],
             "meta_entropy": -jnp.dot(new_y, jnp.log(new_y)),
-            "meta_loss": (lambda y: y.T @ new_sampler["scores"] - config["META_REG"] * jnp.log(y.T @ y)(new_y))
+            "meta_loss": (lambda y: y.T @ new_sampler["scores"] - config["META_REG"] * jnp.log(y.T @ y))(new_y)
         }
         
         train_state = train_state.replace(
@@ -484,7 +480,7 @@ def main(config):
             This function runs the train_step for a certain number of iterations, and then evaluates the policy.
             It returns the updated train state, and a dictionary of metrics.
         """
-        # Train
+        # Train\
         (rng, train_state), metrics = jax.lax.scan(train_step, runner_state, None, config["EVAL_FREQ"])
 
         # Eval
